@@ -16,9 +16,13 @@ public:
     this->declare_parameter("detection_threshold", rclcpp::PARAMETER_DOUBLE);
     this->set_parameter(rclcpp::Parameter("detection_threshold", this->detection_threshold_));
 
+    const auto subscribe_topic = this->declare_parameter<std::string>("subscribe_topic", "data");
+    const auto publish_topic = this->declare_parameter<std::string>("publish_topic", "pointcloud");
+    
+
     this->pointcloud_publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pointcloud", 10);
     this->radar_subscriber_ = this->create_subscription<marine_sensor_msgs::msg::RadarSector>(
-        "data", 100, std::bind(&MarineRadarToPointcloud::radarSectorCallback, this, _1));
+        "/data", 100, std::bind(&MarineRadarToPointcloud::radarSectorCallback, this, _1));
   }
 
 protected:

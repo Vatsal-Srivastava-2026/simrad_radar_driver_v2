@@ -92,7 +92,7 @@ private:
     rclcpp::TimerBase::SharedPtr m_heartbeatTimer;
     
     double m_rangeCorrectionFactor = 1.024;
-    std::string m_frame_id = "radar";
+    std::string m_frame_id = "radar_link";
     AngularSpeedEstimator m_estimator;
     std::string m_radar_id;
 };

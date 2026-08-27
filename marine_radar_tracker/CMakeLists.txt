@@ -2,17 +2,17 @@ cmake_minimum_required(VERSION 3.8)
 project(marine_radar_tracker)
 
 set(ROS_DEPENDS
-    geometry_msgs
-    grid_map_ros
+    # geometry_msgs
+    # grid_map_ros
     marine_sensor_msgs
     pcl_ros
-    marine_interfaces
+    # marine_interfaces
     rclcpp
-    rosbag2
+    # rosbag2
     sensor_msgs
-    tf2
-    tf2_ros
-    visualization_msgs
+    # tf2
+    # tf2_ros
+    # visualization_msgs
 )
 
 set(EXTERNAL_DEPENDS
@@ -36,15 +36,15 @@ foreach(DEPEND ${ROS_DEPENDS} ${EXTERNAL_DEPENDS})
 endforeach(DEPEND)
 
 # Build marine_radar_tracker node:
-add_executable(${PROJECT_NAME} src/marine_radar_tracker.cpp)
-target_include_directories(${PROJECT_NAME}
-   PRIVATE
-   "include/${PROJECT_NAME}/"
-)
-ament_target_dependencies(${PROJECT_NAME}
-   ${ROS_DEPENDS}
-   ${EXTERNAL_DEPENDS_LIB}
-)
+# add_executable(${PROJECT_NAME} src/marine_radar_tracker.cpp)
+# target_include_directories(${PROJECT_NAME}
+#    PRIVATE
+#    "include/${PROJECT_NAME}/"
+# )
+# ament_target_dependencies(${PROJECT_NAME}
+#    ${ROS_DEPENDS}
+#    ${EXTERNAL_DEPENDS_LIB}
+# )
 
 
 # Build marine_radar_to_pointcloud node:
@@ -56,11 +56,11 @@ ament_target_dependencies(marine_radar_to_pointcloud
 target_link_libraries(marine_radar_to_pointcloud ${PCL_LIBRARIES})
 
 message("  Installing: " ${EXECUTABLES})
-install(TARGETS ${PROJECT_NAME}
-        LIBRARY DESTINATION lib/${PROJECT_NAME}
-        ARCHIVE DESTINATION lib/${PROJECT_NAME}
-        RUNTIME DESTINATION lib/${PROJECT_NAME}
-)
+# install(TARGETS ${PROJECT_NAME}
+#         LIBRARY DESTINATION lib/${PROJECT_NAME}
+#         ARCHIVE DESTINATION lib/${PROJECT_NAME}
+#         RUNTIME DESTINATION lib/${PROJECT_NAME}
+# )
 install(TARGETS marine_radar_to_pointcloud #  ${PROJECT_NAME}
         LIBRARY DESTINATION lib/${PROJECT_NAME}
         ARCHIVE DESTINATION lib/${PROJECT_NAME}

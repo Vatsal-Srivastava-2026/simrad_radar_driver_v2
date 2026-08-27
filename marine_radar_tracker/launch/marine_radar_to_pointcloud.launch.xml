@@ -7,6 +7,9 @@
   <node pkg="marine_radar_tracker" exec="marine_radar_to_pointcloud" name="marine_radar_to_pointcloud"
         namespace="$(var radar_ns)">
     <param from="$(find-pkg-share marine_radar_tracker)/config/marine_radar_to_pointcloud.yaml" />
+    <remap from="data" to="/halo_a/data" />
+    <remap from="pointcloud" to="/radar_scan_pointcloud" />
+
   </node>
 
 </launch>
