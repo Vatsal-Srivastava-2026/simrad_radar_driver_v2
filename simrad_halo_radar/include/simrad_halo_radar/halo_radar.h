@@ -9,6 +9,8 @@
 #include <mutex>
 #include <map>
 #include <chrono>
+#include <array>
+#include <cstdint>
 
 #include "halo_radar_structures.h"
 
@@ -25,6 +27,7 @@ uint32_t ipAddressFromString(const std::string &a);
 struct AddressSet
 {
     std::string label;
+    std::string serial_number;
     IPAddress data;
     IPAddress send;
     IPAddress report;
@@ -38,24 +41,112 @@ std::vector <AddressSet> scan(const std::vector<uint32_t> &addresses);
 
 struct Scanline
 {
+    RawScanline raw;
+    std::array<uint8_t, 24> raw_header;
     float angle; // degrees clockwise relative to fwd
     float range; // meters
+    bool heading_valid = false;
+    bool heading_is_true = false;
+    uint16_t ego_heading_raw = 0;
+    float ego_heading_degrees = 0.0F;
     std::vector<uint8_t> intensities;
+    uint64_t revolution = 0;
+};
+
+struct Sector
+{
+    enum class MessageType : uint8_t
+    {
+        DATA = 0,
+        DATA_MISSING = 1,
+        MALFORMED_PACKET = 2,
+        ANGLE_DISCONTINUITY = 3
+    };
+
+    MessageType message_type = MessageType::DATA;
+    MessageType preceding_continuity = MessageType::DATA;
+    int64_t arrival_time_ns = 0;
+    int64_t previous_arrival_time_ns = 0;
+    int64_t arrival_gap_ns = 0;
+    uint64_t received_packet_sequence = 0;
+    std::string source_address;
+    uint16_t source_port = 0;
+    uint32_t datagram_size = 0;
+    uint32_t socket_message_flags = 0;
+    bool datagram_truncated = false;
+    bool has_kernel_drop_count = false;
+    uint32_t kernel_drop_count = 0;
+    uint32_t kernel_drop_count_delta = 0;
+    std::array<uint8_t, 8> raw_packet_header{};
+    uint8_t declared_scanline_count = 0;
+    uint16_t declared_scanline_size = 0;
+    bool has_angle_bounds = false;
+    uint16_t min_raw_angle = 0;
+    uint16_t max_raw_angle = 0;
+    uint16_t first_raw_angle = 0;
+    uint16_t last_raw_angle = 0;
+    // For a synthetic gap this identifies the next angle actually observed;
+    // first_raw_angle identifies the first absent angle.
+    uint16_t observed_first_raw_angle = 0;
+    uint16_t expected_first_raw_angle = 0;
+    uint16_t expected_raw_angle_step = 2;
+    bool has_valid_heading = false;
+    bool heading_consistent = false;
+    bool heading_is_true = false;
+    uint16_t ego_heading_raw = 0;
+    float ego_heading_degrees = 0.0F;
+    uint64_t revolution_start = 0;
+    uint64_t revolution_end = 0;
+    std::vector<uint16_t> missing_raw_angles;
+    std::vector<Scanline> scanlines;
+};
+
+struct DatagramMetadata
+{
+    int64_t arrival_time_ns = 0;
+    std::string source_address;
+    uint16_t source_port = 0;
+    uint32_t socket_message_flags = 0;
+    bool datagram_truncated = false;
+    bool has_kernel_drop_count = false;
+    uint32_t kernel_drop_count = 0;
+};
+
+// Stateful decoder shared by the live UDP receiver and deterministic tests.
+// One input datagram produces one received sector, optionally preceded by a
+// synthetic continuity sector describing missing or ambiguous angles.
+class RadarSectorDecoder
+{
+public:
+    std::vector<Sector> decode(
+        const uint8_t *data, size_t size, DatagramMetadata const &metadata);
+    void reset();
+
+private:
+    bool m_havePreviousArrival = false;
+    int64_t m_previousArrivalTimeNs = 0;
+    bool m_havePreviousSpoke = false;
+    uint16_t m_previousRawAngle = 0;
+    uint64_t m_revolutionCounter = 0;
+    uint64_t m_receivedPacketSequence = 0;
+    bool m_haveKernelDropCount = false;
+    uint32_t m_previousKernelDropCount = 0;
 };
 
 class Radar
 {
 public:
     Radar(AddressSet const &addresses);
-    ~Radar();
+    virtual ~Radar();
     
     void sendCommand(std::string const &key, std::string const &value);
     bool checkHeartbeat();
 
 protected:
-    virtual void processData(std::vector<Scanline> const &scanlines)=0;
+    virtual void processData(Sector const &sector)=0;
     virtual void stateUpdated()=0;
     void startThreads();
+    void stopThreads();
 
     std::map <std::string, std::string> m_state;
 private:
@@ -72,7 +163,7 @@ private:
     AddressSet m_addresses;
     std::thread m_dataThread;
     
-    int m_sendSocket;
+    int m_sendSocket = -1;
     sockaddr_in m_sendAddress;
     
     std::thread m_reportThread;
@@ -80,6 +171,8 @@ private:
     std::mutex m_exitFlagMutex;
     
     std::chrono::system_clock::time_point m_lastHeartbeat;
+
+    RadarSectorDecoder m_sectorDecoder;
 };
 
 class HeadingSender

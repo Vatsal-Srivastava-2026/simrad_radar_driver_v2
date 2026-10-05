@@ -7,6 +7,10 @@
 #include <cstring>
 #include <iostream>
 #include <unistd.h>
+#include <algorithm>
+#include <ctime>
+#include <sys/socket.h>
+#include <stdexcept>
 
 namespace simrad_halo_radar
 {
@@ -146,6 +150,8 @@ std::vector<AddressSet> scan(const std::vector<uint32_t> & addresses)
                 {
                     AddressSet asa;
                     asa.label = "halo_a";
+                    asa.serial_number = std::string(
+                        b201->serialno, strnlen(b201->serialno, sizeof(b201->serialno)));
                     asa.data = b201->addrDataA;
                     asa.send = b201->addrSendA;
                     asa.report = b201->addrReportA;
@@ -153,6 +159,7 @@ std::vector<AddressSet> scan(const std::vector<uint32_t> & addresses)
                     ret.push_back(asa);
                     AddressSet asb;
                     asb.label = "halo_b";
+                    asb.serial_number = asa.serial_number;
                     asb.data = b201->addrDataB;
                     asb.send = b201->addrSendB;
                     asb.report = b201->addrReportB;
@@ -182,13 +189,26 @@ std::string AddressSet::str() const
 Radar::Radar(AddressSet const &addresses):m_addresses(addresses),m_exitFlag(false)
 {
     m_sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (m_sendSocket < 0)
+        throw std::runtime_error("could not create HALO command socket");
     int one = 1;
-    setsockopt(m_sendSocket, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
+    if (setsockopt(m_sendSocket, SOL_SOCKET, SO_REUSEADDR,
+                   (const char *)&one, sizeof(one)) < 0)
+    {
+        close(m_sendSocket);
+        m_sendSocket = -1;
+        throw std::runtime_error("could not configure HALO command socket");
+    }
     
     memset(&m_sendAddress, 0, sizeof(m_sendAddress));
     m_sendAddress.sin_family = AF_INET;
     m_sendAddress.sin_addr.s_addr = addresses.interface;
-    bind(m_sendSocket, (sockaddr *)&m_sendAddress, sizeof(m_sendAddress));
+    if (bind(m_sendSocket, (sockaddr *)&m_sendAddress, sizeof(m_sendAddress)) < 0)
+    {
+        close(m_sendSocket);
+        m_sendSocket = -1;
+        throw std::runtime_error("could not bind HALO command socket to the selected interface");
+    }
     
     m_sendAddress.sin_addr.s_addr = addresses.send.address;
     m_sendAddress.sin_port = addresses.send.port;
@@ -198,22 +218,24 @@ Radar::Radar(AddressSet const &addresses):m_addresses(addresses),m_exitFlag(fals
 
 Radar::~Radar()
 {
+    stopThreads();
+    if (m_sendSocket >= 0)
+    {
+        close(m_sendSocket);
+        m_sendSocket = -1;
+    }
+}
+
+void Radar::stopThreads()
+{
     {
         const std::lock_guard<std::mutex> lock(m_exitFlagMutex);
         m_exitFlag = true;
     }
-    // Check if threads are joinable, output error to cerr if not
-    if (!m_dataThread.joinable()) {
-      std::cerr << "Error: Attempting to join data thread that was never started!" << std::endl;
-    } else {
+    if (m_dataThread.joinable())
       m_dataThread.join();
-    }
-
-    if (!m_reportThread.joinable()) {
-      std::cerr << "Error: Attempting to join report thread that was never started!" << std::endl;
-    } else {
+    if (m_reportThread.joinable())
       m_reportThread.join();
-    }
 }
 
 void Radar::startThreads()
@@ -233,6 +255,16 @@ int Radar::createListenerSocket(uint32_t interface, uint32_t mcast_address, uint
         close(ret);
         return -1;
     }
+#ifdef SO_TIMESTAMPNS
+    // Ask the kernel to attach a CLOCK_REALTIME timestamp to each datagram.
+    // dataThread falls back to clock_gettime when this is unavailable.
+    setsockopt(ret, SOL_SOCKET, SO_TIMESTAMPNS, (const char *)&one, sizeof(one));
+#endif
+#ifdef SO_RXQ_OVFL
+    // Request a cumulative count of UDP packets dropped by the socket receive
+    // queue. This distinguishes local overload from upstream/network loss.
+    setsockopt(ret, SOL_SOCKET, SO_RXQ_OVFL, (const char *)&one, sizeof(one));
+#endif
     timeval timeout;      
     timeout.tv_sec = 1;
     timeout.tv_usec = 0;
@@ -262,54 +294,79 @@ int Radar::createListenerSocket(uint32_t interface, uint32_t mcast_address, uint
     return ret;
 }
 
+
 void Radar::dataThread()
 {
-    int data_socket = createListenerSocket(m_addresses.interface,
-    m_addresses.data.address, m_addresses.data.port);
-    if(data_socket < 0)
+    const int data_socket = createListenerSocket(
+        m_addresses.interface, m_addresses.data.address, m_addresses.data.port);
+    if (data_socket < 0)
     {
         perror("data socket");
         return;
     }
-    
+
     uint8_t in_data[65535];
-    while(true)
+    while (true)
     {
         {
             const std::lock_guard<std::mutex> lock(m_exitFlagMutex);
-            if(m_exitFlag)
+            if (m_exitFlag)
                 break;
         }
-        sockaddr_in from_addr;
-        unsigned int from_addr_len = sizeof(from_addr);
-        int nbytes = recvfrom(data_socket,in_data,65535,0,(sockaddr*)&from_addr,&from_addr_len);
-        if(nbytes > 0)
+
+        sockaddr_in from_addr{};
+        iovec iov{};
+        iov.iov_base = in_data;
+        iov.iov_len = sizeof(in_data);
+        char control[CMSG_SPACE(sizeof(timespec)) + CMSG_SPACE(sizeof(uint32_t))]{};
+        msghdr message{};
+        message.msg_name = &from_addr;
+        message.msg_namelen = sizeof(from_addr);
+        message.msg_iov = &iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control;
+        message.msg_controllen = sizeof(control);
+
+        const ssize_t nbytes = recvmsg(data_socket, &message, 0);
+        if (nbytes <= 0)
+            continue;
+
+        timespec arrival{};
+        clock_gettime(CLOCK_REALTIME, &arrival);
+        DatagramMetadata metadata;
+        for (cmsghdr *cmsg = CMSG_FIRSTHDR(&message); cmsg != nullptr;
+             cmsg = CMSG_NXTHDR(&message, cmsg))
         {
-            RawSector *sector = reinterpret_cast<RawSector*>(in_data);
-            //std::cerr << "sector stuff: " << int(sector->stuff[0]) << ", " << int(sector->stuff[1]) << ", " << int(sector->stuff[2]) << ", " << int(sector->stuff[3]) << ", " << int(sector->stuff[4]) << std::endl;
-            std::vector<Scanline> scanlines;
-            for(int i = 0; i < sector->scanline_count; i++)
+#ifdef SCM_TIMESTAMPNS
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMPNS &&
+                cmsg->cmsg_len >= CMSG_LEN(sizeof(timespec)))
             {
-                if (sector->lines[i].status == 2) //valid
-                {
-                    Scanline s;
-                    if(sector->lines[i].large_range == 128)
-                        if(sector->lines[i].small_range == -1)
-                            s.range = 0;
-                        else
-                            s.range = sector->lines[i].small_range/4.0;
-                    else
-                        s.range = sector->lines[i].large_range*sector->lines[i].small_range/512.0;
-                    s.angle = sector->lines[i].angle*360.0/4096.0;
-                    for(int j = 0; j < 512; j++)
-                    {
-                        s.intensities.push_back(sector->lines[i].data[j]&0x0f);
-                        s.intensities.push_back((sector->lines[i].data[j]&0xf0)>>4);
-                    }
-                    scanlines.push_back(s);
-                }
+                std::memcpy(&arrival, CMSG_DATA(cmsg), sizeof(arrival));
+                continue;
             }
-            this->processData(scanlines);
+#endif
+#ifdef SO_RXQ_OVFL
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SO_RXQ_OVFL &&
+                cmsg->cmsg_len >= CMSG_LEN(sizeof(uint32_t)))
+            {
+                std::memcpy(
+                    &metadata.kernel_drop_count, CMSG_DATA(cmsg), sizeof(uint32_t));
+                metadata.has_kernel_drop_count = true;
+            }
+#endif
+        }
+
+        metadata.arrival_time_ns =
+            static_cast<int64_t>(arrival.tv_sec) * 1000000000LL + arrival.tv_nsec;
+        metadata.source_address = ipAddressToString(from_addr.sin_addr.s_addr);
+        metadata.source_port = ntohs(from_addr.sin_port);
+        metadata.socket_message_flags = static_cast<uint32_t>(message.msg_flags);
+        metadata.datagram_truncated = (message.msg_flags & MSG_TRUNC) != 0;
+
+        for (const auto &sector : m_sectorDecoder.decode(
+                 in_data, static_cast<size_t>(nbytes), metadata))
+        {
+            processData(sector);
         }
     }
     close(data_socket);
@@ -335,7 +392,9 @@ void Radar::reportThread()
         }
         sockaddr_in from_addr;
         unsigned int from_addr_len = sizeof(from_addr);
-        int nbytes = recvfrom(report_socket,in_data,65535,0,(sockaddr*)&from_addr,&from_addr_len);
+        const ssize_t nbytes = recvfrom(
+            report_socket, in_data, sizeof(in_data), 0,
+            reinterpret_cast<sockaddr *>(&from_addr), &from_addr_len);
         if(nbytes > 0)
         {
             if(nbytes >= 2)
@@ -346,6 +405,8 @@ void Radar::reportThread()
                 switch(id)
                 {
                     case 0xc401:
+                        if (nbytes < 3)
+                            break;
                         switch(in_data[2])
                         {
                             case 1:
@@ -364,7 +425,7 @@ void Radar::reportThread()
                     case 0xc402:
                     {
                         RadarReport_c402 *c402 = reinterpret_cast<RadarReport_c402*>(in_data);
-                        if(nbytes >= sizeof(RadarReport_c402))
+                        if(nbytes >= static_cast<ssize_t>(sizeof(RadarReport_c402)))
                         {
                             new_state["range"] = std::to_string(c402->range/10);
                             
@@ -447,7 +508,7 @@ void Radar::reportThread()
                     case 0xc404:
                     {
                         RadarReport_c404 *c404 = reinterpret_cast<RadarReport_c404*>(in_data);
-                        if(nbytes >= sizeof(RadarReport_c404))
+                        if(nbytes >= static_cast<ssize_t>(sizeof(RadarReport_c404)))
                         {
                             new_state["bearing_alignment"] = std::to_string(c404->bearing_alignment/10.0);
                             new_state["antenna_height"] = std::to_string(c404->antenna_height/1000.0);
@@ -477,7 +538,7 @@ void Radar::reportThread()
                     case 0xc408:
                     {
                         RadarReport_c408 *c408 = reinterpret_cast<RadarReport_c408*>(in_data);
-                        if(nbytes >= sizeof(RadarReport_c408))
+                        if(nbytes >= static_cast<ssize_t>(sizeof(RadarReport_c408)))
                         {
                             switch(c408->sea_state)
                             {
@@ -604,7 +665,9 @@ void Radar::reportThread()
 
 void Radar::sendCommand(const uint8_t data[], int size)
 {
-    sendto(m_sendSocket, data, size, 0, (sockaddr*)&m_sendAddress,sizeof(m_sendAddress));
+    if (m_sendSocket >= 0)
+        sendto(m_sendSocket, data, size, 0,
+               reinterpret_cast<sockaddr *>(&m_sendAddress), sizeof(m_sendAddress));
 }
 
 void Radar::sendHeartbeat()
@@ -858,4 +921,3 @@ void HeadingSender::setHeading(double heading)
 }
 
 } // namespace halo_radar
-

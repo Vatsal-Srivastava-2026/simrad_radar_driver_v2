@@ -60,7 +60,55 @@ The `simrad_halo_radar` node publishes data and state from each of the dual freq
 | Published Topic              | Data Type                                         |
 |------------------------------|---------------------------------------------------|
 | `<radar_freq_address>/data`  | `marine_sensor_msgs::msg::RadarSector`            |
+| `<radar_freq_address>/raw_data` | `simrad_halo_radar::msg::HaloRadarSector`      |
+| `<radar_freq_address>/events` | `simrad_halo_radar::msg::HaloRadarEvent`        |
 | `<radar_freq_address>/state` | `marine_radar_control_msgs::msg::RadarControlSet` |
+
+`raw_data` preserves every spoke in wire order, including spokes whose status
+is not `0x02`. It publishes the exact sector and spoke headers, packed echo
+bytes, raw range and angle fields, scan numbers, kernel UDP arrival timestamp,
+arrival gap, source endpoint, packet sizes, and driver-generated revolution
+counters. Linux socket receive-queue overflow counters are also included when
+the kernel supplies them, which distinguishes local socket overload from loss
+upstream of the host. A synthetic message with `message_type=DATA_MISSING` is published
+immediately before a sector when the forward raw-angle sequence contains a
+gap; `missing_raw_angles` lists every expected raw angle that was absent. The
+following received sector repeats this list and describes the transition in
+`preceding_continuity` so the evidence survives loss of the synthetic message
+during ROS recording.
+
+The driver assumes received UDP sectors remain in capture order, while allowing
+gaps between them. In other words, every newly received sector is treated as
+later than the previous received sector; an even raw-angle jump is reported as
+the explicit set of intervening missing spoke angles. The UDP transport itself
+does not prove this ordering, so an externally reordered datagram would be
+indistinguishable from forward loss under this policy.
+
+Each spoke also includes the untouched 16-bit heading word and a decoded ego
+heading. The lower 12 bits are converted with `raw * 360 / 4096`; bit `0x4000`
+marks true north, while a clear bit means magnetic north. `heading_valid` is
+false if another upper bit is present. The sector repeats the first valid
+heading and sets `heading_consistent` only if all valid spoke headings in that
+sector have the same value and north reference.
+
+The expected raw-angle increment of two is the behavior observed for the
+Simrad HALO 24 used by this project: the 4096-value angle circle therefore
+normally carries 2048 spokes. It is an explicit continuity assumption, not a
+claim that every Navico model or operating mode must use that lattice.
+
+The `events` topic reports missing data, ambiguous angle transitions,
+malformed packets, kernel receive-queue drops, long arrival gaps, unusual
+spoke statuses, and completed revolutions. The same events plus a compact
+record for every received sector are flushed immediately to a local JSONL
+audit file. The default location is
+`<package-share>/simrad_halo_radar/logs/<radar_freq_address>/<UTC>_events.jsonl`.
+The package share directory is resolved at runtime through the ROS ament index,
+so it contains no path from the build PC. Set `event_log_directory` to override
+it. The radar serial number recovered during discovery is included
+in raw sectors, events, and JSONL records. If the local
+`received_packet_sequence` is
+consecutive but the bag sequence is not, the loss happened after UDP reception
+(DDS or recording); a gap already present in the local file happened earlier.
 
 
 #### Subscriptions:
@@ -77,6 +125,44 @@ The `simrad_halo_radar` node publishes data and state from each of the dual freq
 | `hostIPs`                                      | `std::vector<std::string>` | N/A           |
 | `<radar_freq_address>.frame_id`                | `std::string`              | `"radar"`     |
 | `<radar_freq_address>.range_correction_factor` | `double`                   | `1.024`       |
+| `<radar_freq_address>.raw_data_qos_depth`      | `int`                      | `512`         |
+| `<radar_freq_address>.radar_model`             | `std::string`              | `"Simrad HALO 24"` |
+| `<radar_freq_address>.enable_event_logging`    | `bool`                     | `true`        |
+| `<radar_freq_address>.require_event_log`       | `bool`                     | `true`        |
+| `<radar_freq_address>.event_qos_depth`         | `int`                      | `256`         |
+| `<radar_freq_address>.arrival_gap_warning_ms`  | `double`                   | `100.0`       |
+| `<radar_freq_address>.event_log_directory`     | `std::string`              | `<resolved package share>/logs` |
+
+The raw topic uses reliable, volatile, keep-last QoS. Its configurable depth
+defaults to 512 messages (approximately eight revolutions when packets contain
+32 spokes and a revolution contains 2048 spokes). Avoid unbounded keep-all
+history because each normal raw message carries roughly 17 KB of wire data.
+The event topic uses the same reliable, volatile, keep-last policy with its
+own configurable depth.
+
+With `require_event_log=true`, failure to create or open the JSONL audit file
+stops that radar subnode at startup. This is intentional for data collection:
+the machine cannot silently continue without the independent loss evidence.
+Set it to `false` only when ROS publication without a local audit file is an
+acceptable degraded mode.
+
+## Driver self-test
+
+Build with tests enabled (the default) and run:
+
+```bash
+colcon test --packages-select simrad_halo_radar
+colcon test-result --verbose
+```
+
+The suite creates HALO-format synthetic datagrams and covers raw field, range,
+heading, and intensity decoding; all spoke statuses; exact loss lists
+(including wrap and a near-full revolution); a complete 2048-spoke revolution;
+malformed and oversized datagrams; counter wrap/reset; and deterministic random
+packet stress. It also sends real multicast UDP over the loopback interface and
+runs an end-to-end ROS test for raw, legacy, and event topics plus flushed JSONL
+logging. The required-log failure path is tested as well. The multicast tests
+require a host kernel that permits loopback multicast sockets.
 
 
 #### Radar State Parameters:

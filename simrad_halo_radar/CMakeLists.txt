@@ -3,11 +3,14 @@ project(simrad_halo_radar)
 
 set(ROS_DEPENDS
   ament_cmake
+  ament_index_cpp
+  builtin_interfaces
   rclcpp
   marine_radar_control_msgs
   marine_sensor_msgs
   nav_msgs
   rosbag2
+  std_msgs
   tf2
 )
 
@@ -19,7 +22,7 @@ set(EXTERNAL_DEPENDS_LIB
 
 
 get_filename_component(PACKAGE_NAME ${CMAKE_CURRENT_SOURCE_DIR} NAME)
-message("Creating Package: ${PACKAGE_NAME}")
+message(STATUS "Creating Package: ${PACKAGE_NAME}")
 project(${PACKAGE_NAME})  ## this package name is the name of the directory this cmake file is in
 
 
@@ -41,6 +44,18 @@ endif()
 foreach(DEPEND ${ROS_DEPENDS} ${EXTERNAL_DEPENDS})
   find_package(${DEPEND} REQUIRED)
 endforeach(DEPEND)
+
+find_package(rosidl_default_generators REQUIRED)
+
+set(INTERFACE_TARGET ${PROJECT_NAME})
+rosidl_generate_interfaces(${INTERFACE_TARGET}
+  "msg/HaloRadarSpoke.msg"
+  "msg/HaloRadarSector.msg"
+  "msg/HaloRadarEvent.msg"
+  DEPENDENCIES builtin_interfaces std_msgs
+)
+rosidl_get_typesupport_target(CPP_TYPESUPPORT_TARGET
+  ${INTERFACE_TARGET} "rosidl_typesupport_cpp")
 
 
 ################
@@ -68,19 +83,22 @@ include_directories(
 
 set(EXECUTABLES "")  # for installing later
 
-message("buliding ${PROJECT_NAME} node: ")
+message(STATUS "Building ${PROJECT_NAME} node:")
 
 foreach(NODE_FILE ${NODES})
   get_filename_component(NODE_NAME ${NODE_FILE} NAME_WE)
-  message("  - " ${NODE_NAME})
-  list(APPEND EXECUTABLES ${NODE_NAME})
-  add_executable(${NODE_NAME} ${NODE_FILE} ${HDRS} ${SRCS})
-  ament_target_dependencies(${NODE_NAME} ${ROS_DEPENDS} ${EXTERNAL_DEPENDS_LIB})
-  target_include_directories(${NODE_NAME} PRIVATE "include/${PROJECT_NAME}/")
+  set(NODE_TARGET ${NODE_NAME}_executable)
+  message(STATUS "  - ${NODE_NAME}")
+  list(APPEND EXECUTABLES ${NODE_TARGET})
+  add_executable(${NODE_TARGET} ${NODE_FILE} ${HDRS} ${SRCS})
+  set_target_properties(${NODE_TARGET} PROPERTIES OUTPUT_NAME ${NODE_NAME})
+  ament_target_dependencies(${NODE_TARGET} ${ROS_DEPENDS} ${EXTERNAL_DEPENDS_LIB})
+  target_link_libraries(${NODE_TARGET} "${CPP_TYPESUPPORT_TARGET}")
+  target_include_directories(${NODE_TARGET} PRIVATE "include/${PROJECT_NAME}/")
 endforeach(NODE_FILE)
 
 
-message("  Installing: " ${EXECUTABLES})
+message(STATUS "Installing: ${EXECUTABLES}")
 install(TARGETS
   ${EXECUTABLES}
   DESTINATION lib/${PROJECT_NAME}/
@@ -100,8 +118,24 @@ install(DIRECTORY
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(test_halo_driver
+    test/test_halo_driver.cpp
+    src/halo_radar.cpp
+    src/halo_radar_node.cpp
+    src/radar_sector_decoder.cpp
+  )
+  if(TARGET test_halo_driver)
+    ament_target_dependencies(test_halo_driver ${ROS_DEPENDS})
+    target_link_libraries(test_halo_driver "${CPP_TYPESUPPORT_TARGET}")
+    target_include_directories(test_halo_driver PRIVATE "include/${PROJECT_NAME}/")
+    set_tests_properties(test_halo_driver PROPERTIES TIMEOUT 45)
+  endif()
 endif()
+
+ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()
 
