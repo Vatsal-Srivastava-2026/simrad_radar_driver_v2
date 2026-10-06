@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>simrad_halo_radar</name>
+  <name>simrad_halo_driver_v2</name>
   <version>0.0.0</version>
   <description>
     Driver for the Simrad Halo series of marine radars

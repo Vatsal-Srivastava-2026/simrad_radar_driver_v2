@@ -6,7 +6,26 @@ This driver interfaces with Simrad HALO radar via multicast UDP communication.
 
 Clone this repo into your workspace.
 
-Run `rosdep update` to install dependencies included in rosdistro.
+Source ROS 2 before invoking `colcon`:
+
+```bash
+source /opt/ros/humble/setup.bash
+```
+
+Install dependencies registered with rosdep:
+
+```bash
+rosdep update
+rosdep install --from-paths . --ignore-src -r -y
+```
+
+In particular, the legacy sector publisher requires `marine_sensor_msgs`.
+If rosdep does not install it automatically on Ubuntu/ROS 2 Humble, install it
+directly:
+
+```bash
+sudo apt install ros-humble-marine-sensor-msgs
+```
 
 Clone the `marine_radar_control_msgs` repo (not included in rosdistro): 
 
@@ -19,16 +38,29 @@ Plugin for rqt to view data and control settings: https://github.com/CCOMJHC/rqt
 
 ### Build
 
-Run `colcon build` in the root of your workspace to build. 
+From the workspace root, build the local control messages and v2 driver:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon --log-base log_v2 build \
+  --build-base build_v2 \
+  --install-base install_v2 \
+  --packages-select marine_radar_control_msgs simrad_halo_driver_v2
+source install_v2/setup.bash
+```
+
+The separate `build_v2`, `install_v2`, and `log_v2` directories ensure
+that building or sourcing this package does not replace an existing
+`simrad_halo_radar` installation.
 
 
 ## Usage
 
 Run node with `ros2 run` or `ros2 launch`: 
 
-```ros2 run simrad_halo_radar simrad_halo_radar``` or 
+```ros2 run simrad_halo_driver_v2 simrad_halo_driver_v2``` or
 
-```ros2 launch simrad_halo_radar simrad_halo_radar.launch.xml```
+```ros2 launch simrad_halo_driver_v2 simrad_halo_driver_v2.launch.xml```
 
 By default, the driver will scan all available interfaces. To restrict which interface(s) to use, specify the list of IP local addresses using the `hostIPs` parameter.
 
@@ -51,17 +83,20 @@ Use the `rqt_marine_radar` plugin to switch the radar mode between transmit and 
 
 ## Nodes
 
-### simrad_halo_radar Node 
+### simrad_halo_driver_v2 Node 
 
-The `simrad_halo_radar` node publishes data and state from each of the dual frequencies of the Halo radar. The first frequency is addressed by `/halo_a` and `/halo_b`. `<radar_freq_address>` in the topic names below refers to either the `/halo_a` or `/halo_b` topics.
+The `simrad_halo_driver_v2` node publishes data and state from each of the
+dual frequencies of the HALO radar. The two channels are addressed by
+`/halo_a` and `/halo_b`. `<radar_freq_address>` in the topic names below
+refers to either topic prefix.
 
 #### Publishers:
 
 | Published Topic              | Data Type                                         |
 |------------------------------|---------------------------------------------------|
 | `<radar_freq_address>/data`  | `marine_sensor_msgs::msg::RadarSector`            |
-| `<radar_freq_address>/raw_data` | `simrad_halo_radar::msg::HaloRadarSector`      |
-| `<radar_freq_address>/events` | `simrad_halo_radar::msg::HaloRadarEvent`        |
+| `<radar_freq_address>/raw_data` | `simrad_halo_driver_v2::msg::HaloRadarSector` |
+| `<radar_freq_address>/events` | `simrad_halo_driver_v2::msg::HaloRadarEvent`     |
 | `<radar_freq_address>/state` | `marine_radar_control_msgs::msg::RadarControlSet` |
 
 `raw_data` preserves every spoke in wire order, including spokes whose status
@@ -101,7 +136,7 @@ malformed packets, kernel receive-queue drops, long arrival gaps, unusual
 spoke statuses, and completed revolutions. The same events plus a compact
 record for every received sector are flushed immediately to a local JSONL
 audit file. The default location is
-`<package-share>/simrad_halo_radar/logs/<radar_freq_address>/<UTC>_events.jsonl`.
+`<package-share>/simrad_halo_driver_v2/logs/<radar_freq_address>/<UTC>_events.jsonl`.
 The package share directory is resolved at runtime through the ROS ament index,
 so it contains no path from the build PC. Set `event_log_directory` to override
 it. The radar serial number recovered during discovery is included
@@ -151,8 +186,11 @@ acceptable degraded mode.
 Build with tests enabled (the default) and run:
 
 ```bash
-colcon test --packages-select simrad_halo_radar
-colcon test-result --verbose
+colcon --log-base log_v2 test \
+  --build-base build_v2 \
+  --install-base install_v2 \
+  --packages-select simrad_halo_driver_v2
+colcon test-result --test-result-base build_v2 --verbose
 ```
 
 The suite creates HALO-format synthetic datagrams and covers raw field, range,

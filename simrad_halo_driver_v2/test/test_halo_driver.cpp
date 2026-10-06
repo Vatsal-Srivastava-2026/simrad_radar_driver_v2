@@ -525,7 +525,7 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
   const std::string label = "ros_test_" + std::to_string(getpid());
   const auto addresses = makeAddresses(label, "239.255.43.11", "239.255.43.12");
   const auto package_share = std::filesystem::path(
-      ament_index_cpp::get_package_share_directory("simrad_halo_radar"));
+      ament_index_cpp::get_package_share_directory("simrad_halo_driver_v2"));
   const auto log_directory = package_share / "logs" / label;
   std::error_code cleanup_error;
   std::filesystem::remove_all(log_directory, cleanup_error);
@@ -538,19 +538,19 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
   auto node =
       std::make_shared<rclcpp::Node>("halo_ros_integration_test", options);
 
-  std::vector<simrad_halo_radar::msg::HaloRadarSector> raw_messages;
-  std::vector<simrad_halo_radar::msg::HaloRadarEvent> events;
+  std::vector<simrad_halo_driver_v2::msg::HaloRadarSector> raw_messages;
+  std::vector<simrad_halo_driver_v2::msg::HaloRadarEvent> events;
   std::vector<marine_sensor_msgs::msg::RadarSector> legacy_messages;
   auto raw_subscription =
-      node->create_subscription<simrad_halo_radar::msg::HaloRadarSector>(
+      node->create_subscription<simrad_halo_driver_v2::msg::HaloRadarSector>(
           label + "/raw_data", rclcpp::QoS(32).reliable(),
-          [&](simrad_halo_radar::msg::HaloRadarSector::SharedPtr message) {
+          [&](simrad_halo_driver_v2::msg::HaloRadarSector::SharedPtr message) {
             raw_messages.push_back(*message);
           });
   auto event_subscription =
-      node->create_subscription<simrad_halo_radar::msg::HaloRadarEvent>(
+      node->create_subscription<simrad_halo_driver_v2::msg::HaloRadarEvent>(
           label + "/events", rclcpp::QoS(32).reliable(),
-          [&](simrad_halo_radar::msg::HaloRadarEvent::SharedPtr message) {
+          [&](simrad_halo_driver_v2::msg::HaloRadarEvent::SharedPtr message) {
             events.push_back(*message);
           });
   auto legacy_subscription =
@@ -595,17 +595,18 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
     EXPECT_EQ(raw_messages[0].spokes[0].raw_samples[0], 0xa3U);
     EXPECT_EQ(raw_messages[0].spokes[1].status, 0x00U);
     EXPECT_EQ(raw_messages[1].message_type,
-              simrad_halo_radar::msg::HaloRadarSector::DATA_MISSING);
+              simrad_halo_driver_v2::msg::HaloRadarSector::DATA_MISSING);
     EXPECT_EQ(raw_messages[1].missing_raw_angles,
               (std::vector<uint16_t>{204, 206, 208}));
     EXPECT_EQ(raw_messages[2].missing_raw_angles,
               (std::vector<uint16_t>{204, 206, 208}));
     EXPECT_EQ(events[0].event_type,
-              simrad_halo_radar::msg::HaloRadarEvent::SPOKE_STATUS);
+              simrad_halo_driver_v2::msg::HaloRadarEvent::SPOKE_STATUS);
     bool saw_missing_event = false;
     for (const auto &event : events)
-      saw_missing_event |= event.event_type ==
-                           simrad_halo_radar::msg::HaloRadarEvent::DATA_MISSING;
+      saw_missing_event |=
+          event.event_type ==
+          simrad_halo_driver_v2::msg::HaloRadarEvent::DATA_MISSING;
     EXPECT_TRUE(saw_missing_event);
     ASSERT_EQ(legacy_messages[0].intensities.size(), 1U);
     ASSERT_EQ(legacy_messages[0].intensities[0].echoes.size(), 1024U);
@@ -643,7 +644,7 @@ TEST(RadarRosConfigurationTest, RequiredAuditLogFailureStopsStartup) {
   rclcpp::NodeOptions options;
   options.parameter_overrides(
       {rclcpp::Parameter(label + ".event_log_directory",
-                         "/proc/simrad_halo_radar_test_logs"),
+                         "/proc/simrad_halo_driver_v2_test_logs"),
        rclcpp::Parameter(label + ".require_event_log", true)});
   auto node = std::make_shared<rclcpp::Node>("halo_log_failure_test", options);
 

@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-
-<launch>
-    <node pkg="simrad_halo_radar" exec="simrad_halo_radar" name="simrad_halo_radar" namespace="" />
-</launch>

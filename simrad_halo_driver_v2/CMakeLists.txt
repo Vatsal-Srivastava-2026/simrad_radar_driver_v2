@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14.4)
-project(simrad_halo_radar)
+project(simrad_halo_driver_v2)
 
 set(ROS_DEPENDS
   ament_cmake

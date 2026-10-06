@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<launch>
+    <node pkg="simrad_halo_driver_v2"
+          exec="simrad_halo_driver_v2"
+          name="simrad_halo_driver_v2"
+          namespace="" />
+</launch>

@@ -1,1 +1,6 @@
 *.pyc
+/log/
+/build_v2/
+/install_v2/
+/log_v2/
+simrad_halo_driver_v2/logs/

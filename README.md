@@ -14,9 +14,10 @@ Defines messages for use by marine radar drivers to control radars. See the [mar
 
 ## Driver Packages
 
-### simrad_halo_radar
+### simrad_halo_driver_v2
 
-Driver for Simrad Halo series of marine radars. See the [simrad_halo_radar README](./simrad_halo_radar/README.md) for details.
+Instrumented v2 driver for Simrad HALO marine radars. See the
+[simrad_halo_driver_v2 README](./simrad_halo_driver_v2/README.md) for details.
 
 
 ## Processing Packages
