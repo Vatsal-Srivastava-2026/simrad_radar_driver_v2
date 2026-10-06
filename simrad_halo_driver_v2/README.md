@@ -215,6 +215,29 @@ runs an end-to-end ROS test for raw, legacy, and event topics plus flushed JSONL
 logging. The required-log failure path is tested as well. The multicast tests
 require a host kernel that permits loopback multicast sockets.
 
+### Recording radar data with rosbag2
+
+Use the installed QoS override file when recording. It gives the raw sector and
+event streams larger reliable queues so short recorder or disk stalls are less
+likely to cause data loss:
+
+```bash
+QOS_FILE="$(ros2 pkg prefix --share simrad_halo_driver_v2)/config/rosbag2_qos_overrides.yaml"
+
+ros2 bag record --storage mcap \
+  --max-cache-size 1073741824 \
+  --qos-profile-overrides-path "$QOS_FILE" \
+  /halo_a/raw_data \
+  /halo_a/events \
+  /halo_a/data \
+  /halo_a/state \
+  /halo_a/change_state
+```
+
+The legacy `/halo_a/data` and `/halo_b/data` topics duplicate information from
+the richer raw topics and may be omitted if bag size is more important than
+legacy compatibility.
+
 
 #### Radar State Parameters:
 

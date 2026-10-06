@@ -1,0 +1,64 @@
+# rosbag2 recorder subscription QoS for simrad_halo_driver_v2.
+#
+# The large raw-data queues are intentional: they give rosbag2 extra room to
+# absorb short disk stalls while recording the high-rate sector streams.
+
+/halo_a/raw_data:
+  history: keep_last
+  depth: 2048
+  reliability: reliable
+  durability: volatile
+
+/halo_b/raw_data:
+  history: keep_last
+  depth: 2048
+  reliability: reliable
+  durability: volatile
+
+/halo_a/events:
+  history: keep_last
+  depth: 1024
+  reliability: reliable
+  durability: volatile
+
+/halo_b/events:
+  history: keep_last
+  depth: 1024
+  reliability: reliable
+  durability: volatile
+
+/halo_a/data:
+  history: keep_last
+  depth: 512
+  reliability: reliable
+  durability: volatile
+
+/halo_b/data:
+  history: keep_last
+  depth: 512
+  reliability: reliable
+  durability: volatile
+
+/halo_a/state:
+  history: keep_last
+  depth: 100
+  reliability: reliable
+  durability: volatile
+
+/halo_b/state:
+  history: keep_last
+  depth: 100
+  reliability: reliable
+  durability: volatile
+
+/halo_a/change_state:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
+
+/halo_b/change_state:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: volatile
