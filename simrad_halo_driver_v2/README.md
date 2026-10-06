@@ -132,10 +132,10 @@ normally carries 2048 spokes. It is an explicit continuity assumption, not a
 claim that every Navico model or operating mode must use that lattice.
 
 The `events` topic reports missing data, ambiguous angle transitions,
-malformed packets, kernel receive-queue drops, long arrival gaps, unusual
-spoke statuses, and completed revolutions. The same events plus a compact
-record for every received sector are flushed immediately to a local JSONL
-audit file. The default location is
+malformed packets, kernel receive-queue drops, long arrival gaps, and unusual
+spoke statuses. The same events plus a compact record for every received
+sector are flushed immediately to a local JSONL audit file. The default
+location is
 `<package-share>/simrad_halo_driver_v2/logs/<radar_freq_address>/<UTC>_events.jsonl`.
 The package share directory is resolved at runtime through the ROS ament index,
 so it contains no path from the build PC. Set `event_log_directory` to override
@@ -144,6 +144,19 @@ in raw sectors, events, and JSONL records. If the local
 `received_packet_sequence` is
 consecutive but the bag sequence is not, the loss happened after UDP reception
 (DDS or recording); a gap already present in the local file happened earlier.
+
+At every completed revolution the driver also writes a summary to stdout and
+as a `record_type="revolution_summary"` JSONL record. It contains received
+sector/spoke counts, detected inter-sector and within-packet missing-spoke
+counts, malformed sector counts, ambiguous transitions, and non-`0x02` spoke
+counts. Each received sector JSONL record also contains
+`internal_missing_spoke_count` and `invalid_spoke_count`. These
+statistics are deliberately not published in a ROS message. The first
+revolution is marked `partial_revolution=true` because capture may start in the
+middle of a sweep. The driver cannot know the exact number of absent UDP
+datagrams because sector spoke counts vary, so `missing_sector_gap_count` is
+the number of contiguous inter-sector gap incidents rather than an inferred
+datagram count.
 
 
 #### Subscriptions:

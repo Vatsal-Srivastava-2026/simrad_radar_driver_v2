@@ -45,6 +45,17 @@ protected:
   void stateUpdated() override;
 
 private:
+  struct RevolutionStatistics {
+    uint32_t received_sector_count = 0;
+    uint32_t received_spoke_count = 0;
+    uint32_t missing_sector_gap_count = 0;
+    uint32_t missing_spoke_count = 0;
+    uint32_t internal_missing_spoke_count = 0;
+    uint32_t invalid_sector_count = 0;
+    uint32_t ambiguous_transition_count = 0;
+    uint32_t invalid_spoke_count = 0;
+  };
+
   /*!
    * \brief Send command to radar to update state upon receiving a change state
    * command. \param cv RadarControlValue
@@ -97,9 +108,18 @@ private:
   void publishEvent(uint8_t event_type, simrad_halo_radar::Sector const &sector,
                     std::string const &details,
                     std::vector<uint8_t> const &statuses = {},
-                    std::vector<uint16_t> const &status_counts = {});
+                    std::vector<uint16_t> const &status_counts = {},
+                    uint32_t event_count = 0);
   void writeSectorLog(simrad_halo_radar::Sector const &sector);
-  void writeEventLog(simrad_halo_driver_v2::msg::HaloRadarEvent const &event);
+  void writeEventLog(simrad_halo_driver_v2::msg::HaloRadarEvent const &event,
+                     uint32_t event_count);
+  void updateRevolutionStatistics(
+      simrad_halo_radar::Sector const &sector);
+  void reportCompletedRevolutions(
+      simrad_halo_radar::Sector const &sector);
+  void writeRevolutionSummary(
+      uint64_t revolution, int64_t timestamp_ns,
+      RevolutionStatistics const &statistics, bool partial_revolution);
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Publisher<marine_sensor_msgs::msg::RadarSector>::SharedPtr m_data_pub;
@@ -124,6 +144,8 @@ private:
   int64_t m_arrival_gap_warning_ns = 100000000;
   bool m_have_event_revolution = false;
   uint64_t m_last_event_revolution = 0;
+  uint64_t m_first_event_revolution = 0;
+  std::map<uint64_t, RevolutionStatistics> m_revolution_statistics;
   std::ofstream m_event_log_file;
   std::mutex m_event_log_mutex;
   std::string m_event_log_path;

@@ -305,8 +305,12 @@ void RosRadar::writeSectorLog(simrad_halo_radar::Sector const &sector) {
     return;
 
   std::map<uint8_t, uint16_t> status_counts;
-  for (const auto &scanline : sector.scanlines)
+  uint32_t invalid_spoke_count = 0;
+  for (const auto &scanline : sector.scanlines) {
     ++status_counts[scanline.raw.status];
+    if (scanline.raw.status != 0x02)
+      ++invalid_spoke_count;
+  }
 
   const std::lock_guard<std::mutex> lock(m_event_log_mutex);
   m_event_log_file
@@ -332,6 +336,9 @@ void RosRadar::writeSectorLog(simrad_halo_radar::Sector const &sector) {
       << static_cast<unsigned>(sector.declared_scanline_count)
       << ",\"declared_scanline_size\":" << sector.declared_scanline_size
       << ",\"parsed_scanline_count\":" << sector.scanlines.size()
+      << ",\"internal_missing_spoke_count\":"
+      << sector.internal_missing_spoke_count
+      << ",\"invalid_spoke_count\":" << invalid_spoke_count
       << ",\"has_angle_bounds\":"
       << (sector.has_angle_bounds ? "true" : "false")
       << ",\"min_raw_angle\":" << sector.min_raw_angle
@@ -374,7 +381,8 @@ void RosRadar::writeSectorLog(simrad_halo_radar::Sector const &sector) {
 }
 
 void RosRadar::writeEventLog(
-    simrad_halo_driver_v2::msg::HaloRadarEvent const &event) {
+    simrad_halo_driver_v2::msg::HaloRadarEvent const &event,
+    uint32_t event_count) {
   if (!m_enable_event_logging || !m_event_log_file)
     return;
 
@@ -392,6 +400,7 @@ void RosRadar::writeEventLog(
                    << jsonEscape(m_radar_serial_number) << "\""
                    << ",\"timestamp_ns\":" << timestamp_ns << ",\"event_type\":"
                    << static_cast<unsigned>(event.event_type)
+                   << ",\"count\":" << event_count
                    << ",\"received_packet_sequence\":"
                    << event.received_packet_sequence
                    << ",\"revolution_start\":" << event.revolution_start
@@ -430,7 +439,8 @@ void RosRadar::publishEvent(uint8_t event_type,
                             simrad_halo_radar::Sector const &sector,
                             std::string const &details,
                             std::vector<uint8_t> const &statuses,
-                            std::vector<uint16_t> const &status_counts) {
+                            std::vector<uint16_t> const &status_counts,
+                            uint32_t event_count) {
   if (!m_enable_event_logging)
     return;
 
@@ -456,13 +466,176 @@ void RosRadar::publishEvent(uint8_t event_type,
   event.spoke_statuses = statuses;
   event.spoke_status_counts = status_counts;
   event.details = details;
-  writeEventLog(event);
+  writeEventLog(event, event_count);
   m_event_pub->publish(event);
 }
 
-void RosRadar::logSectorEvents(simrad_halo_radar::Sector const &sector) {
-  if (!m_enable_event_logging)
+void RosRadar::updateRevolutionStatistics(
+    simrad_halo_radar::Sector const &sector) {
+  using MessageType = simrad_halo_radar::Sector::MessageType;
+
+  // A synthetic DATA_MISSING sector owns the missing-angle list. The following
+  // real sector repeats that list only for recorder resilience, so count it
+  // here once rather than from both messages.
+  if (sector.message_type == MessageType::DATA_MISSING) {
+    uint64_t revolution = sector.revolution_start;
+    uint16_t previous_angle = 0;
+    bool have_previous_angle = false;
+    std::vector<uint64_t> touched_revolutions;
+    for (const uint16_t angle : sector.missing_raw_angles) {
+      if (have_previous_angle && angle < previous_angle)
+        ++revolution;
+      auto &statistics = m_revolution_statistics[revolution];
+      ++statistics.missing_spoke_count;
+      if (touched_revolutions.empty() ||
+          touched_revolutions.back() != revolution)
+        touched_revolutions.push_back(revolution);
+      previous_angle = angle;
+      have_previous_angle = true;
+    }
+    for (const uint64_t touched : touched_revolutions)
+      ++m_revolution_statistics[touched].missing_sector_gap_count;
+  } else if (sector.message_type == MessageType::ANGLE_DISCONTINUITY) {
+    ++m_revolution_statistics[sector.revolution_start]
+          .ambiguous_transition_count;
+  }
+
+  // Attribute exact step-two gaps between adjacent spokes in this datagram to
+  // the appropriate revolution without storing every missing angle.
+  if (sector.internal_missing_spoke_count > 0) {
+    for (size_t i = 1; i < sector.scanlines.size(); ++i) {
+      const auto &previous_scanline = sector.scanlines[i - 1];
+      const auto &current_scanline = sector.scanlines[i];
+      const uint16_t forward_delta =
+          (current_scanline.raw.angle + 4096 - previous_scanline.raw.angle) %
+          4096;
+      if (forward_delta <= 2 || forward_delta % 2 != 0)
+        continue;
+
+      uint16_t previous_angle = previous_scanline.raw.angle;
+      uint16_t missing_angle = (previous_angle + 2) % 4096;
+      uint64_t revolution = previous_scanline.revolution;
+      while (missing_angle != current_scanline.raw.angle) {
+        if (missing_angle < previous_angle)
+          ++revolution;
+        auto &statistics = m_revolution_statistics[revolution];
+        ++statistics.missing_spoke_count;
+        ++statistics.internal_missing_spoke_count;
+        previous_angle = missing_angle;
+        missing_angle = (missing_angle + 2) % 4096;
+      }
+    }
+  }
+
+  // Synthetic continuity messages have no backing UDP datagram.
+  if (sector.datagram_size == 0)
     return;
+
+  std::vector<uint64_t> touched_revolutions;
+  if (sector.scanlines.empty()) {
+    touched_revolutions.push_back(sector.revolution_start);
+  } else {
+    for (const auto &scanline : sector.scanlines) {
+      auto &statistics = m_revolution_statistics[scanline.revolution];
+      ++statistics.received_spoke_count;
+      if (scanline.raw.status != 0x02)
+        ++statistics.invalid_spoke_count;
+      if (touched_revolutions.empty() ||
+          touched_revolutions.back() != scanline.revolution)
+        touched_revolutions.push_back(scanline.revolution);
+    }
+  }
+
+  for (const uint64_t touched : touched_revolutions) {
+    auto &statistics = m_revolution_statistics[touched];
+    ++statistics.received_sector_count;
+    if (sector.message_type == MessageType::MALFORMED_PACKET)
+      ++statistics.invalid_sector_count;
+  }
+}
+
+void RosRadar::writeRevolutionSummary(
+    uint64_t revolution, int64_t timestamp_ns,
+    RevolutionStatistics const &statistics, bool partial_revolution) {
+  if (!m_enable_event_logging || !m_event_log_file)
+    return;
+
+  const std::lock_guard<std::mutex> lock(m_event_log_mutex);
+  m_event_log_file
+      << "{\"record_type\":\"revolution_summary\""
+      << ",\"radar\":\"" << jsonEscape(m_radar_id) << "\""
+      << ",\"radar_model\":\"" << jsonEscape(m_radar_model) << "\""
+      << ",\"radar_serial_number\":\""
+      << jsonEscape(m_radar_serial_number) << "\""
+      << ",\"timestamp_ns\":" << timestamp_ns
+      << ",\"revolution\":" << revolution
+      << ",\"received_sector_count\":" << statistics.received_sector_count
+      << ",\"received_spoke_count\":" << statistics.received_spoke_count
+      << ",\"missing_sector_gap_count\":"
+      << statistics.missing_sector_gap_count
+      << ",\"missing_spoke_count\":" << statistics.missing_spoke_count
+      << ",\"internal_missing_spoke_count\":"
+      << statistics.internal_missing_spoke_count
+      << ",\"invalid_sector_count\":" << statistics.invalid_sector_count
+      << ",\"ambiguous_transition_count\":"
+      << statistics.ambiguous_transition_count
+      << ",\"invalid_spoke_count\":" << statistics.invalid_spoke_count
+      << ",\"partial_revolution\":"
+      << (partial_revolution ? "true" : "false") << "}\n";
+  m_event_log_file.flush();
+}
+
+void RosRadar::reportCompletedRevolutions(
+    simrad_halo_radar::Sector const &sector) {
+  if (sector.datagram_size == 0 || sector.scanlines.empty())
+    return;
+
+  if (!m_have_event_revolution) {
+    m_last_event_revolution = sector.revolution_start;
+    m_first_event_revolution = sector.revolution_start;
+    m_have_event_revolution = true;
+  }
+  if (sector.revolution_end <= m_last_event_revolution)
+    return;
+
+  for (uint64_t completed = m_last_event_revolution;
+       completed < sector.revolution_end; ++completed) {
+    const auto iterator = m_revolution_statistics.find(completed);
+    const RevolutionStatistics empty_statistics;
+    const RevolutionStatistics &statistics =
+        iterator == m_revolution_statistics.end() ? empty_statistics
+                                                  : iterator->second;
+    const bool partial_revolution = completed == m_first_event_revolution;
+
+    std::ostringstream summary;
+    summary << "revolution " << completed << " completed"
+            << ": received_sectors=" << statistics.received_sector_count
+            << " received_spokes=" << statistics.received_spoke_count
+            << " missing_sector_gaps="
+            << statistics.missing_sector_gap_count
+            << " missing_spokes=" << statistics.missing_spoke_count
+            << " internal_missing_spokes="
+            << statistics.internal_missing_spoke_count
+            << " invalid_sectors=" << statistics.invalid_sector_count
+            << " invalid_spokes=" << statistics.invalid_spoke_count
+            << " ambiguous_transitions="
+            << statistics.ambiguous_transition_count
+            << " partial_revolution="
+            << (partial_revolution ? "true" : "false");
+    std::cout << m_radar_id << ": " << summary.str() << std::endl;
+    writeRevolutionSummary(completed, sector.arrival_time_ns, statistics,
+                           partial_revolution);
+
+    if (iterator != m_revolution_statistics.end())
+      m_revolution_statistics.erase(iterator);
+  }
+  m_last_event_revolution = sector.revolution_end;
+}
+
+void RosRadar::logSectorEvents(simrad_halo_radar::Sector const &sector) {
+  // The stdout summary remains active even if structured event publication or
+  // JSONL logging is disabled.
+  updateRevolutionStatistics(sector);
 
   using Event = simrad_halo_driver_v2::msg::HaloRadarEvent;
   if (sector.message_type ==
@@ -473,7 +646,8 @@ void RosRadar::logSectorEvents(simrad_halo_radar::Sector const &sector) {
             << sector.observed_first_raw_angle;
     RCLCPP_WARN(node_->get_logger(), "%s: %s", m_radar_id.c_str(),
                 details.str().c_str());
-    publishEvent(Event::DATA_MISSING, sector, details.str());
+    publishEvent(Event::DATA_MISSING, sector, details.str(), {}, {},
+                 static_cast<uint32_t>(sector.missing_raw_angles.size()));
   } else if (sector.message_type ==
              simrad_halo_radar::Sector::MessageType::ANGLE_DISCONTINUITY) {
     std::ostringstream details;
@@ -485,9 +659,22 @@ void RosRadar::logSectorEvents(simrad_halo_radar::Sector const &sector) {
     publishEvent(Event::ANGLE_DISCONTINUITY, sector, details.str());
   }
 
+  if (sector.internal_missing_spoke_count > 0) {
+    std::ostringstream details;
+    details << sector.internal_missing_spoke_count
+            << (sector.internal_missing_spoke_count == 1 ? " spoke" : " spokes")
+            << " missing inside received UDP sector";
+    RCLCPP_WARN(node_->get_logger(), "%s: %s", m_radar_id.c_str(),
+                details.str().c_str());
+    publishEvent(Event::DATA_MISSING, sector, details.str(), {}, {},
+                 sector.internal_missing_spoke_count);
+  }
+
   // The remaining events correspond only to a real received UDP datagram.
-  if (sector.datagram_size == 0)
+  if (sector.datagram_size == 0) {
+    reportCompletedRevolutions(sector);
     return;
+  }
 
   if (sector.message_type ==
       simrad_halo_radar::Sector::MessageType::MALFORMED_PACKET) {
@@ -529,36 +716,23 @@ void RosRadar::logSectorEvents(simrad_halo_radar::Sector const &sector) {
   if (!nonstandard_status_counts.empty()) {
     std::vector<uint8_t> statuses;
     std::vector<uint16_t> counts;
+    uint32_t invalid_spoke_count = 0;
     std::ostringstream details;
     details << "non-0x02 spoke statuses:";
     for (const auto &entry : nonstandard_status_counts) {
       statuses.push_back(entry.first);
       counts.push_back(entry.second);
+      invalid_spoke_count += entry.second;
       details << " 0x" << std::hex << static_cast<unsigned>(entry.first)
               << std::dec << '=' << entry.second;
     }
     RCLCPP_WARN(node_->get_logger(), "%s: %s", m_radar_id.c_str(),
                 details.str().c_str());
-    publishEvent(Event::SPOKE_STATUS, sector, details.str(), statuses, counts);
+    publishEvent(Event::SPOKE_STATUS, sector, details.str(), statuses, counts,
+                 invalid_spoke_count);
   }
 
-  if (!m_have_event_revolution) {
-    m_last_event_revolution = sector.revolution_start;
-    m_have_event_revolution = true;
-  }
-  if (sector.revolution_end > m_last_event_revolution) {
-    for (uint64_t completed = m_last_event_revolution;
-         completed < sector.revolution_end; ++completed) {
-      auto completed_sector = sector;
-      completed_sector.revolution_start = completed;
-      completed_sector.revolution_end = completed;
-      std::ostringstream details;
-      details << "revolution " << completed << " completed";
-      publishEvent(Event::REVOLUTION_COMPLETED, completed_sector,
-                   details.str());
-    }
-    m_last_event_revolution = sector.revolution_end;
-  }
+  reportCompletedRevolutions(sector);
 }
 
 void RosRadar::stateUpdated() {

@@ -98,6 +98,7 @@ struct Sector
     uint64_t revolution_start = 0;
     uint64_t revolution_end = 0;
     std::vector<uint16_t> missing_raw_angles;
+    uint32_t internal_missing_spoke_count = 0;
     std::vector<Scanline> scanlines;
 };
 

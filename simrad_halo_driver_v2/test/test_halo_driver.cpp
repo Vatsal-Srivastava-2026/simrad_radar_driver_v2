@@ -253,6 +253,19 @@ TEST(RadarSectorDecoderTest, DecodesAllWireFieldsAndUnpackedIntensities) {
   EXPECT_EQ(second.ego_heading_raw, 512U);
 }
 
+TEST(RadarSectorDecoderTest, CountsMissingSpokesInsideOneDatagram) {
+  RadarSectorDecoder decoder;
+  const auto packet =
+      makePacket({SpokeSpec{100, 1}, SpokeSpec{106, 2}, SpokeSpec{108, 3}});
+  const auto decoded =
+      decoder.decode(packet.data(), packet.size(), metadata(1000));
+
+  ASSERT_EQ(decoded.size(), 1U);
+  EXPECT_EQ(decoded[0].message_type, Sector::MessageType::DATA);
+  EXPECT_EQ(decoded[0].internal_missing_spoke_count, 2U);
+  EXPECT_TRUE(decoded[0].missing_raw_angles.empty());
+}
+
 TEST(RadarSectorDecoderTest, EmitsExactMissingAnglesAcrossRevolutionWrap) {
   RadarSectorDecoder decoder;
   auto first = makePacket({SpokeSpec{4092, 1}, SpokeSpec{4094, 2}});
@@ -565,7 +578,7 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
   {
     RosRadar radar(node, addresses);
     const auto first =
-        makePacket({SpokeSpec{200, 1, 0x02}, SpokeSpec{202, 2, 0x00}});
+        makePacket({SpokeSpec{4078, 1, 0x02}, SpokeSpec{4082, 2, 0x00}});
     bool got_first = false;
     for (int attempt = 0; attempt < 5 && !got_first; ++attempt) {
       ASSERT_TRUE(sendMulticast(addresses.data, first));
@@ -577,7 +590,7 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
     }
     ASSERT_TRUE(got_first);
 
-    const auto second = makePacket({SpokeSpec{210, 3}, SpokeSpec{212, 4}});
+    const auto second = makePacket({SpokeSpec{4090, 3}, SpokeSpec{4092, 4}});
     ASSERT_TRUE(sendMulticast(addresses.data, second));
     const auto deadline = std::chrono::steady_clock::now() + 3s;
     while (std::chrono::steady_clock::now() < deadline &&
@@ -597,20 +610,41 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
     EXPECT_EQ(raw_messages[1].message_type,
               simrad_halo_driver_v2::msg::HaloRadarSector::DATA_MISSING);
     EXPECT_EQ(raw_messages[1].missing_raw_angles,
-              (std::vector<uint16_t>{204, 206, 208}));
+              (std::vector<uint16_t>{4084, 4086, 4088}));
     EXPECT_EQ(raw_messages[2].missing_raw_angles,
-              (std::vector<uint16_t>{204, 206, 208}));
-    EXPECT_EQ(events[0].event_type,
-              simrad_halo_driver_v2::msg::HaloRadarEvent::SPOKE_STATUS);
+              (std::vector<uint16_t>{4084, 4086, 4088}));
     bool saw_missing_event = false;
-    for (const auto &event : events)
+    bool saw_status_event = false;
+    for (const auto &event : events) {
       saw_missing_event |=
           event.event_type ==
           simrad_halo_driver_v2::msg::HaloRadarEvent::DATA_MISSING;
+      saw_status_event |=
+          event.event_type ==
+          simrad_halo_driver_v2::msg::HaloRadarEvent::SPOKE_STATUS;
+    }
     EXPECT_TRUE(saw_missing_event);
+    EXPECT_TRUE(saw_status_event);
     ASSERT_EQ(legacy_messages[0].intensities.size(), 1U);
     ASSERT_EQ(legacy_messages[0].intensities[0].echoes.size(), 1024U);
     EXPECT_FLOAT_EQ(legacy_messages[0].intensities[0].echoes[0], 3.0F / 15.0F);
+
+    // Cross the raw-angle wrap. The missing 4094 spoke belongs to revolution
+    // zero, while the received angle-zero spoke starts revolution one.
+    const auto wrapped = makePacket({SpokeSpec{0, 5}});
+    ASSERT_TRUE(sendMulticast(addresses.data, wrapped));
+    const auto revolution_deadline = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < revolution_deadline &&
+           raw_messages.size() < 5) {
+      executor.spin_some(10ms);
+    }
+    ASSERT_GE(raw_messages.size(), 5U);
+    EXPECT_EQ(raw_messages[3].missing_raw_angles,
+              (std::vector<uint16_t>{4094}));
+    for (const auto &event : events)
+      EXPECT_NE(event.event_type,
+                simrad_halo_driver_v2::msg::HaloRadarEvent::
+                    REVOLUTION_COMPLETED);
   }
   executor.spin_some();
 
@@ -629,7 +663,34 @@ TEST(RadarRosIntegrationTest, PublishesRawLegacyAndEventsAndFlushesJsonl) {
   EXPECT_NE(contents.find("\"record_type\":\"event\""), std::string::npos);
   EXPECT_NE(contents.find("\"record_type\":\"driver_stop\""),
             std::string::npos);
-  EXPECT_NE(contents.find("\"missing_raw_angles\":[204,206,208]"),
+  EXPECT_NE(contents.find("\"missing_raw_angles\":[4084,4086,4088]"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"internal_missing_spoke_count\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"invalid_spoke_count\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find(
+                "\"details\":\"1 spoke missing inside received UDP sector\""),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"event_type\":1,\"count\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"record_type\":\"revolution_summary\""),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"received_sector_count\":2"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"received_spoke_count\":4"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"missing_sector_gap_count\":2"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"missing_spoke_count\":5"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"internal_missing_spoke_count\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"invalid_sector_count\":0"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"invalid_spoke_count\":1"),
+            std::string::npos);
+  EXPECT_NE(contents.find("\"partial_revolution\":true"),
             std::string::npos);
 }
 

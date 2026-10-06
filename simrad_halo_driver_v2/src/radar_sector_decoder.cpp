@@ -94,6 +94,10 @@ RadarSectorDecoder::decode(const uint8_t *data, size_t size,
                            DatagramMetadata const &metadata) {
   std::vector<Sector> output;
   Sector sector;
+  // Even a malformed datagram with no decodable spokes belongs to the
+  // decoder's current revolution for diagnostic accounting.
+  sector.revolution_start = m_revolutionCounter;
+  sector.revolution_end = m_revolutionCounter;
   sector.arrival_time_ns = metadata.arrival_time_ns;
   sector.previous_arrival_time_ns =
       m_havePreviousArrival ? m_previousArrivalTimeNs : 0;
@@ -181,6 +185,19 @@ RadarSectorDecoder::decode(const uint8_t *data, size_t size,
         } else if (sector.heading_is_true != scanline.heading_is_true ||
                    sector.ego_heading_raw != scanline.ego_heading_raw) {
           sector.heading_consistent = false;
+        }
+      }
+    }
+    if (angles_valid) {
+      for (size_t i = 1; i < sector.scanlines.size(); ++i) {
+        const uint16_t previous = sector.scanlines[i - 1].raw.angle;
+        const uint16_t current = sector.scanlines[i].raw.angle;
+        const uint16_t forward_delta =
+            (current + kRawAngleModulus - previous) % kRawAngleModulus;
+        if (forward_delta > kExpectedRawAngleStep &&
+            forward_delta % kExpectedRawAngleStep == 0) {
+          sector.internal_missing_spoke_count +=
+              forward_delta / kExpectedRawAngleStep - 1;
         }
       }
     }
